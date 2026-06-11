@@ -1,71 +1,63 @@
-const std = @import("std");
-const Io = std.Io;
+//------------------------------------------------------------------------------
+// One code base, GPU-rendered via pixel shader on every platform:
+// this file plus src/shader.glsl builds for Windows (D3D11), macOS (Metal),
+// iOS (Metal), Android (GLES3), Web (WebGL2/WebGPU) and Linux (GL).
+//------------------------------------------------------------------------------
+const sokol = @import("sokol");
+const slog = sokol.log;
+const sg = sokol.gfx;
+const sapp = sokol.app;
+const sglue = sokol.glue;
+const shd = @import("shader");
 
-const zigtest = @import("zigtest");
+const state = struct {
+    var time: f32 = 0.0;
+    var pip: sg.Pipeline = .{};
+    var pass_action: sg.PassAction = .{};
+};
 
-pub fn main(init: std.process.Init) !void {
-    // Prints to stderr, unbuffered, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-
-    // This is appropriate for anything that lives as long as the process.
-    const arena: std.mem.Allocator = init.arena.allocator();
-
-    // Accessing command line arguments:
-    const args = try init.minimal.args.toSlice(arena);
-    for (args) |arg| {
-        std.log.info("arg: {s}", .{arg});
-    }
-
-    // In order to do I/O operations need an `Io` instance.
-    const io = init.io;
-
-    // Stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
-    const stdout_writer = &stdout_file_writer.interface;
-
-    try zigtest.printAnotherMessage(stdout_writer);
-
-    try stdout_writer.flush(); // Don't forget to flush!
-}
-
-test "simple test" {
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(i32) = .empty;
-    defer list.deinit(gpa); // Try commenting this out and see if zig detects the memory leak!
-    try list.append(gpa, 42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
-}
-
-test "fuzz example" {
-    try std.testing.fuzz({}, testOne, .{});
-}
-
-fn testOne(context: void, smith: *std.testing.Smith) !void {
-    _ = context;
-    // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
-
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(u8) = .empty;
-    defer list.deinit(gpa);
-    while (!smith.eos()) switch (smith.value(enum { add_data, dup_data })) {
-        .add_data => {
-            const slice = try list.addManyAsSlice(gpa, smith.value(u4));
-            smith.bytes(slice);
-        },
-        .dup_data => {
-            if (list.items.len == 0) continue;
-            if (list.items.len > std.math.maxInt(u32)) return error.SkipZigTest;
-            const len = smith.valueRangeAtMost(u32, 1, @min(32, list.items.len));
-            const off = smith.valueRangeAtMost(u32, 0, @intCast(list.items.len - len));
-            try list.appendSlice(gpa, list.items[off..][0..len]);
-            try std.testing.expectEqualSlices(
-                u8,
-                list.items[off..][0..len],
-                list.items[list.items.len - len ..],
-            );
-        },
+export fn init() void {
+    sg.setup(.{
+        .environment = sglue.environment(),
+        .logger = .{ .func = slog.func },
+    });
+    // the fullscreen triangle is generated in the vertex shader, no buffers needed
+    state.pip = sg.makePipeline(.{
+        .shader = sg.makeShader(shd.demoShaderDesc(sg.queryBackend())),
+    });
+    state.pass_action.colors[0] = .{
+        .load_action = .CLEAR,
+        .clear_value = .{ .r = 0, .g = 0, .b = 0, .a = 1 },
     };
+}
+
+export fn frame() void {
+    state.time += @floatCast(sapp.frameDuration());
+    const fs_params = shd.FsParams{
+        .resolution = .{ sapp.widthf(), sapp.heightf() },
+        .time = state.time,
+    };
+    sg.beginPass(.{ .action = state.pass_action, .swapchain = sglue.swapchain() });
+    sg.applyPipeline(state.pip);
+    sg.applyUniforms(shd.UB_fs_params, sg.asRange(&fs_params));
+    sg.draw(0, 3, 1);
+    sg.endPass();
+    sg.commit();
+}
+
+export fn cleanup() void {
+    sg.shutdown();
+}
+
+pub fn main() void {
+    sapp.run(.{
+        .init_cb = init,
+        .frame_cb = frame,
+        .cleanup_cb = cleanup,
+        .width = 800,
+        .height = 600,
+        .window_title = "zigtest pixel shader demo",
+        .icon = .{ .sokol_default = true },
+        .logger = .{ .func = slog.func },
+    });
 }
